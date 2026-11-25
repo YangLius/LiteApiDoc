@@ -291,7 +291,7 @@ async function probe(urls, save) {
     const hasStored = !!(props.specHeaders && props.specHeaders !== '{}')
     const payloadHeaders = Object.keys(headers).length ? headers : (save && hasStored ? {} : undefined)
     const d = await api.post(`/projects/${props.projectId}/import/spec-url/analyze`,
-      { urls: list, save: !!save, insecure: insecure.value, headers: payloadHeaders }, { projectId: props.projectId })
+      { urls: list, save: !!save, insecure: insecure.value, headers: payloadHeaders }, { projectId: props.projectId, timeout: 180000 })
     const rows = d.results?.length ? d.results : [d] // 兼容旧单地址响应
     rows.forEach(r => { r.checked = !r.error; markActions(r) })
     results.value = rows
@@ -314,7 +314,7 @@ async function applyChecked() {
       const gid = await resolveGroupId(r)
       const decisions = r.items.map(it => ({ method: it.method, path: it.path, action: it.action || 'overwrite' }))
       const d = await api.post(`/projects/${props.projectId}/import/openapi/apply`,
-        { analysisId: r.analysisId, groupId: gid || undefined, decisions }, { projectId: props.projectId })
+        { analysisId: r.analysisId, groupId: gid || undefined, decisions }, { projectId: props.projectId, timeout: 600000 })
       created += d.created; updated += d.updated; skipped += d.skipped
       if (d.conflicts?.length) allConflicts.push(...d.conflicts)
     }
@@ -350,7 +350,7 @@ async function syncSaved() {
       const gid = await resolveGroupId(r)
       const decisions = r.items.map(it => ({ method: it.method, path: it.path, action: 'overwrite' }))
       const d = await api.post(`/projects/${props.projectId}/import/openapi/apply`,
-        { analysisId: r.analysisId, groupId: gid || undefined, decisions }, { projectId: props.projectId })
+        { analysisId: r.analysisId, groupId: gid || undefined, decisions }, { projectId: props.projectId, timeout: 600000 })
       created += d.created; updated += d.updated; skipped += d.skipped
       if (d.conflicts?.length) allConflicts.push(...d.conflicts)
     }
@@ -368,7 +368,7 @@ async function analyze() {
   plan.value = null
   try {
     const d = await api.post(`/projects/${props.projectId}/import/openapi/analyze`, { content: content.value },
-      { projectId: props.projectId })
+      { projectId: props.projectId, timeout: 600000 })
     markActions(d)
     plan.value = d
   } catch (e) { ElMessage.error(e.message) } finally { analyzing.value = false }
@@ -382,7 +382,7 @@ async function apply() {
   try {
     const decisions = plan.value.items.map(it => ({ method: it.method, path: it.path, action: it.action }))
     const d = await api.post(`/projects/${props.projectId}/import/openapi/apply`,
-      { content: content.value, groupId: targetGroupId.value > 0 ? targetGroupId.value : undefined, decisions }, { projectId: props.projectId })
+      { content: content.value, groupId: targetGroupId.value > 0 ? targetGroupId.value : undefined, decisions }, { projectId: props.projectId, timeout: 600000 })
     let msg = `新建 ${d.created},更新 ${d.updated},跳过 ${d.skipped}`
     if (d.conflicts?.length) msg += `,模板冲突 ${d.conflicts.length}:${d.conflicts.join('、')}`
     ElMessage.success('导入完成:' + msg)

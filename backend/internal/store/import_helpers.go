@@ -30,16 +30,13 @@ func (s *Store) FindApiByMethodPath(projectID int64, method, path string) (model
 	return list[0], nil
 }
 
-// FindTemplateConflict 返回与给定路径产生 Mock 路由歧义的既有接口路径(无则空串)。
-func (s *Store) FindTemplateConflict(projectID int64, method, path string) (string, error) {
-	existing, err := s.ListApis(projectID)
-	if err != nil {
-		return "", err
-	}
-	for _, e := range existing {
-		if e.Method == method && templateAmbiguous(e.Path, path) {
-			return e.Path, nil
+// FindTemplateConflictAmong 在已有接口列表(内存快照)中查找与给定路径产生
+// Mock 路由歧义的冲突路径,O(n) 纯内存,批量导入避免逐条全表扫描。
+func FindTemplateConflictAmong(existing []model.Api, method, path string) string {
+	for i := range existing {
+		if existing[i].Method == method && templateAmbiguous(existing[i].Path, path) {
+			return existing[i].Path
 		}
 	}
-	return "", nil
+	return ""
 }

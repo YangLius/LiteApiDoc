@@ -24,6 +24,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"liteapidoc/internal/model"
+	"liteapidoc/internal/store"
 	"liteapidoc/internal/openapi"
 )
 
@@ -67,13 +68,21 @@ type specItem struct {
 // analyzeSpecItems 对解析出的接口做存在性/模板冲突分析。
 func (s *Server) analyzeSpecItems(projectID int64, basePath string, apis []openapi.ParsedApi) ([]specItem, int, int) {
 	items := make([]specItem, 0, len(apis))
+	// 一次性快照 + 内存判断,避免逐条全表扫描(数千接口时曾拖慢分析)
+	existing, err := s.Store.ListApis(projectID)
+	if err != nil {
+		existing = nil
+	}
+	seen := make(map[string]bool, len(existing))
+	for i := range existing {
+		seen[existing[i].Method+" "+existing[i].Path] = true
+	}
 	for _, pa := range apis {
 		full := joinBase(basePath, pa.Path)
-		exists, _ := s.Store.ApiExistsByMethodPath(projectID, pa.Method, full)
-		conflict, _ := s.Store.FindTemplateConflict(projectID, pa.Method, full)
 		items = append(items, specItem{
 			Name: pa.Name, Method: pa.Method, Path: full,
-			Exists: exists, ConflictPath: conflict,
+			Exists:       seen[pa.Method+" "+full],
+			ConflictPath: store.FindTemplateConflictAmong(existing, pa.Method, full),
 		})
 	}
 	toCreate, toOverwrite := 0, 0
@@ -514,6 +523,7 @@ func (s *Server) OpenAPIApply(c *gin.Context) {
 	}
 	created, updated, skipped := 0, 0, 0
 	var conflicts []string
+	items := make([]model.Api, 0, len(apis))
 	for _, pa := range apis {
 		full := joinBase(basePath, pa.Path)
 		if act[pa.Method+" "+full] != "overwrite" {
@@ -522,31 +532,15 @@ func (s *Server) OpenAPIApply(c *gin.Context) {
 		}
 		na := parsedToApi(p.ID, basePath, pa)
 		na.GroupID = req.GroupID // 新接口落入指定分组(0=未分组)
-		isUpdate := false
-		existing, err := s.Store.FindApiByMethodPath(p.ID, na.Method, na.Path)
-		if err == nil {
-			isUpdate = true
-			na.ID, na.SortOrder, na.CreatedAt = existing.ID, existing.SortOrder, existing.CreatedAt
-			if req.GroupID <= 0 {
-				na.GroupID = existing.GroupID // 未显式指定分组时,保留已有归属
-			}
-			err = s.Store.UpdateApi(&na)
-		} else {
-			err = s.Store.CreateApi(&na)
-		}
-		switch {
-		case err == nil:
-			if isUpdate {
-				updated++
-			} else {
-				created++
-			}
-		case strings.Contains(err.Error(), "模板冲突"):
-			conflicts = append(conflicts, na.Method+" "+na.Path)
-		default:
+		items = append(items, na)
+	}
+	if len(items) > 0 {
+		cr, up, conf, err := s.Store.ImportApis(p.ID, items, req.GroupID)
+		if err != nil {
 			fail(c, http.StatusInternalServerError, err.Error())
 			return
 		}
+		created, updated, conflicts = cr, up, conf
 	}
 	ok(c, gin.H{"created": created, "updated": updated, "skipped": skipped, "conflicts": conflicts})
 }
@@ -706,8 +700,9 @@ func (s *Server) ImportProjectJSON(c *gin.Context) {
 			oldToNew[g.ID] = ng.ID
 		}
 	}
-	// 接口
+	// 接口(批量导入:单事务 + 内存冲突校验)
 	warnings := []string{}
+	apiItems := make([]model.Api, 0, len(bk.Apis))
 	for _, a := range bk.Apis {
 		a.ID = 0
 		a.ProjectID = np.ID
@@ -716,8 +711,13 @@ func (s *Server) ImportProjectJSON(c *gin.Context) {
 			warnings = append(warnings, a.Name+": "+err.Error())
 			continue
 		}
-		if err := s.Store.CreateApi(&a); err != nil {
-			warnings = append(warnings, a.Method+" "+a.Path+": 导入失败")
+		apiItems = append(apiItems, a)
+	}
+	if _, _, conf, err := s.Store.ImportApis(np.ID, apiItems, -1); err != nil {
+		warnings = append(warnings, "部分接口导入失败: "+err.Error())
+	} else {
+		for _, cp := range conf {
+			warnings = append(warnings, cp+": 模板冲突,已跳过")
 		}
 	}
 	// 环境

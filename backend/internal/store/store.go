@@ -561,13 +561,95 @@ func (s *Store) UpdateApi(a *model.Api) error {
 			return ErrTemplateConflict
 		}
 	}
-	_, err = s.DB.Exec(`UPDATE apis SET project_id=?,group_id=?,name=?,method=?,path=?,status=?,owner=?,remark=?,
+	return s.execUpdateApi(a)
+}
+
+// execUpdateApi 原始更新(不做唯一性/模板校验,由调用方保证)。
+func (s *Store) execUpdateApi(a *model.Api) error {
+	_, err := s.DB.Exec(`UPDATE apis SET project_id=?,group_id=?,name=?,method=?,path=?,status=?,owner=?,remark=?,
 		path_params=?,query_params=?,header_params=?,body_schema=?,body_example=?,responses=?,mock_config=?,sort_order=?,updated_at=?
 		WHERE id=?`,
 		a.ProjectID, a.GroupID, a.Name, a.Method, a.Path, a.Status, a.Owner, a.Remark,
 		mustJSON(a.PathParams), mustJSON(a.QueryParams), mustJSON(a.HeaderParams),
 		string(a.BodySchema), a.BodyExample, mustJSON(a.Responses), mustJSON(a.Mock), a.SortOrder, nowUnix(), a.ID)
 	return err
+}
+
+// ImportApis 批量导入接口(覆盖语义):唯一性与模板冲突基于一次性快照在内存校验,
+// 避免逐条全表扫描(O(n²) 曾致数千接口导入超时崩溃)。
+// forceGroup>0 强制所有接口落入该分组;==0 时更新保留原分组、新建落未分组;
+// <0 完全保留接口自带分组(JSON 备份导入)。返回新建/更新计数与模板冲突列表。
+func (s *Store) ImportApis(projectID int64, items []model.Api, forceGroup int64) (created, updated int, conflicts []string, err error) {
+	existing, err := s.ListApis(projectID)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	tx, err := s.DB.Begin() // 整批单事务:数百上千次写一次提交,兼得速度与原子性
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	defer tx.Rollback()
+	byKey := make(map[string]int, len(existing))
+	for i := range existing {
+		byKey[existing[i].Method+" "+existing[i].Path] = i
+	}
+	for i := range items {
+		na := items[i]
+		na.ProjectID = projectID
+		key := na.Method + " " + na.Path
+		if idx, ok := byKey[key]; ok {
+			old := existing[idx]
+			na.ID, na.CreatedAt, na.SortOrder = old.ID, old.CreatedAt, old.SortOrder
+			switch {
+			case forceGroup > 0:
+				na.GroupID = forceGroup
+			case forceGroup == 0:
+				na.GroupID = old.GroupID // 未显式指定分组时保留已有归属
+			default:
+				// forceGroup<0:保留 na 自带分组
+			}
+			if _, err := tx.Exec(`UPDATE apis SET project_id=?,group_id=?,name=?,method=?,path=?,status=?,owner=?,remark=?,
+				path_params=?,query_params=?,header_params=?,body_schema=?,body_example=?,responses=?,mock_config=?,sort_order=?,updated_at=?
+				WHERE id=?`,
+				na.ProjectID, na.GroupID, na.Name, na.Method, na.Path, na.Status, na.Owner, na.Remark,
+				mustJSON(na.PathParams), mustJSON(na.QueryParams), mustJSON(na.HeaderParams),
+				string(na.BodySchema), na.BodyExample, mustJSON(na.Responses), mustJSON(na.Mock), na.SortOrder, nowUnix(), na.ID); err != nil {
+				return created, updated, conflicts, err
+			}
+			updated++
+			existing[idx] = na
+			continue
+		}
+		// 模板冲突:对快照(含本轮新建)纯内存校验
+		if cp := FindTemplateConflictAmong(existing, na.Method, na.Path); cp != "" {
+			conflicts = append(conflicts, na.Method+" "+na.Path)
+			continue
+		}
+		now := nowUnix()
+		if forceGroup > 0 {
+			na.GroupID = forceGroup
+		} else if forceGroup == 0 {
+			na.GroupID = 0
+		}
+		na.CreatedAt, na.UpdatedAt = now, now
+		res, err := tx.Exec(`INSERT INTO apis
+			(project_id,group_id,name,method,path,status,owner,remark,path_params,query_params,header_params,body_schema,body_example,responses,mock_config,sort_order,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			na.ProjectID, na.GroupID, na.Name, na.Method, na.Path, na.Status, na.Owner, na.Remark,
+			mustJSON(na.PathParams), mustJSON(na.QueryParams), mustJSON(na.HeaderParams),
+			string(na.BodySchema), na.BodyExample, mustJSON(na.Responses), mustJSON(na.Mock), na.SortOrder, now, now)
+		if err != nil {
+			return created, updated, conflicts, err
+		}
+		na.ID, _ = res.LastInsertId()
+		existing = append(existing, na)
+		byKey[key] = len(existing) - 1
+		created++
+	}
+	if err := tx.Commit(); err != nil {
+		return created, updated, conflicts, err
+	}
+	return created, updated, conflicts, nil
 }
 
 // UpdateApiMockConfig 仅更新 Mock 策略(文档页快捷开关)。
