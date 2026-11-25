@@ -19,3 +19,5 @@ backend/liteapidoc
 .vscode/
 .DS_Store
 Thumbs.db
+# 编译备份残留
+*.exe~
