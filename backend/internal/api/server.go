@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -294,6 +295,7 @@ func decodeProjectPatch(raw []byte) (patch func(*model.Project), err error) {
 		MockEnabled       *bool       `json:"mockEnabled"`
 		GlobalHeaders     *[]model.KV `json:"globalHeaders"`
 		GlobalMockHeaders *[]model.KV `json:"globalMockHeaders"`
+		SpecUrl           *string     `json:"specUrl"`
 		SortOrder         *int64      `json:"sortOrder"`
 	}
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -317,6 +319,9 @@ func decodeProjectPatch(raw []byte) (patch func(*model.Project), err error) {
 		}
 		if req.GlobalMockHeaders != nil {
 			p.GlobalMockHeaders = *req.GlobalMockHeaders
+		}
+		if req.SpecUrl != nil {
+			p.SpecUrl = strings.TrimSpace(*req.SpecUrl)
 		}
 		if req.SortOrder != nil {
 			p.SortOrder = *req.SortOrder

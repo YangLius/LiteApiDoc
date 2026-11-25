@@ -71,6 +71,7 @@ func NewRouter(s *Server) *gin.Engine {
 
 		g.POST("/projects/:id/import/openapi/analyze", s.OpenAPIAnalyze)
 		g.POST("/projects/:id/import/openapi/apply", s.OpenAPIApply)
+		g.POST("/projects/:id/import/spec-url/analyze", s.SpecURLAnalyze)
 		g.GET("/projects/:id/export/openapi", s.ExportOpenAPI)
 		g.GET("/projects/:id/export/json", s.ExportJSON)
 		g.GET("/projects/:id/export/html", s.ExportHTML)

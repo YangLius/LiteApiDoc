@@ -3,10 +3,13 @@ package api
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -47,36 +50,23 @@ func joinBase(base, p string) string {
 
 // ---- OpenAPI 导入(两阶段:analyze 预检冲突 → apply 按决策写入) ----
 
-// OpenAPIAnalyze POST /api/projects/:id/import/openapi/analyze {content}
-func (s *Server) OpenAPIAnalyze(c *gin.Context) {
-	p, allowed := s.checkEdit(c, pathID(c, "id"))
-	if !allowed {
-		return
-	}
-	var req struct {
-		Content string `json:"content" binding:"required"`
-	}
-	if !bindJSON(c, &req) {
-		return
-	}
-	basePath, apis, title, err := openapi.Parse(req.Content)
-	if err != nil {
-		fail(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	type item struct {
-		Name         string `json:"name"`
-		Method       string `json:"method"`
-		Path         string `json:"path"`
-		Exists       bool   `json:"exists"`
-		ConflictPath string `json:"conflictPath"`
-	}
-	items := make([]item, 0, len(apis))
+// specItem 分析结果条目(OpenAPIAnalyze 与 SpecURLAnalyze 共用)。
+type specItem struct {
+	Name         string `json:"name"`
+	Method       string `json:"method"`
+	Path         string `json:"path"`
+	Exists       bool   `json:"exists"`
+	ConflictPath string `json:"conflictPath"`
+}
+
+// analyzeSpecItems 对解析出的接口做存在性/模板冲突分析。
+func (s *Server) analyzeSpecItems(projectID int64, basePath string, apis []openapi.ParsedApi) ([]specItem, int, int) {
+	items := make([]specItem, 0, len(apis))
 	for _, pa := range apis {
 		full := joinBase(basePath, pa.Path)
-		exists, _ := s.Store.ApiExistsByMethodPath(p.ID, pa.Method, full)
-		conflict, _ := s.Store.FindTemplateConflict(p.ID, pa.Method, full)
-		items = append(items, item{
+		exists, _ := s.Store.ApiExistsByMethodPath(projectID, pa.Method, full)
+		conflict, _ := s.Store.FindTemplateConflict(projectID, pa.Method, full)
+		items = append(items, specItem{
 			Name: pa.Name, Method: pa.Method, Path: full,
 			Exists: exists, ConflictPath: conflict,
 		})
@@ -89,10 +79,160 @@ func (s *Server) OpenAPIAnalyze(c *gin.Context) {
 			toCreate++
 		}
 	}
+	return items, toCreate, toOverwrite
+}
+
+// OpenAPIAnalyze POST /api/projects/:id/import/openapi/analyze {content}
+// 支持 OpenAPI 3.0 与 Swagger 2.0(自动转换归一化),$ref 全量内联。
+func (s *Server) OpenAPIAnalyze(c *gin.Context) {
+	p, allowed := s.checkEdit(c, pathID(c, "id"))
+	if !allowed {
+		return
+	}
+	var req struct {
+		Content string `json:"content" binding:"required"`
+	}
+	if !bindJSON(c, &req) {
+		return
+	}
+	content, kind, warnings, err := openapi.Normalize(req.Content)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	basePath, apis, title, err := openapi.Parse(content)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	items, toCreate, toOverwrite := s.analyzeSpecItems(p.ID, basePath, apis)
 	ok(c, gin.H{
 		"title": title, "basePath": basePath, "items": items,
 		"toCreate": toCreate, "toOverwrite": toOverwrite, "total": len(items),
+		"specKind": kind, "warnings": warnings, "content": content,
 	})
+}
+
+// mustNormalized 归一化规范内容(Swagger2→OpenAPI3 + $ref 内联)。
+// 失败时返回原文,让后续 Parse 报出具体版本错误,避免双重报错。
+func mustNormalized(content string) string {
+	nc, _, _, err := openapi.Normalize(content)
+	if err != nil {
+		return content
+	}
+	return nc
+}
+
+// SpecURLAnalyze POST /api/projects/:id/import/spec-url/analyze {url, save, insecure}
+// 从服务地址拉取 Swagger/OpenAPI 规范并分析:先按直连尝试,非规范内容时
+// 自动探测常见规范端点(swagger/doc.json、v3/api-docs 等)。save=true 时把
+// 最终规范地址保存为项目同步源(specUrl),供后续一键同步。
+func (s *Server) SpecURLAnalyze(c *gin.Context) {
+	p, allowed := s.checkEdit(c, pathID(c, "id"))
+	if !allowed {
+		return
+	}
+	var req struct {
+		URL      string `json:"url" binding:"required"`
+		Save     bool   `json:"save"`
+		Insecure bool   `json:"insecure"`
+	}
+	if !bindJSON(c, &req) {
+		return
+	}
+	content, specURL, kind, warnings, err := fetchAndNormalizeSpec(req.URL, req.Insecure)
+	if err != nil {
+		fail(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	basePath, apis, title, err := openapi.Parse(content)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	items, toCreate, toOverwrite := s.analyzeSpecItems(p.ID, basePath, apis)
+	if req.Save {
+		np := p
+		np.SpecUrl = specURL
+		if err := s.Store.UpdateProject(&np); err != nil {
+			fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	ok(c, gin.H{
+		"specUrl": specURL, "specKind": kind, "title": title, "basePath": basePath,
+		"warnings": warnings, "content": content, "items": items,
+		"toCreate": toCreate, "toOverwrite": toOverwrite, "total": len(items),
+	})
+}
+
+// specEndpoints 常见规范端点候选(按生态命中率排序)。
+var specEndpoints = []string{
+	"/swagger/doc.json", // Go swag
+	"/v3/api-docs",      // springdoc (Spring Boot)
+	"/openapi.json",     // FastAPI / 通用
+	"/swagger.json",
+	"/v2/swagger.json", // springfox
+	"/api-docs",        // springfox 默认
+	"/api/openapi.json",
+}
+
+// fetchAndNormalizeSpec 拉取并归一化规范;url 可为规范直链或服务基础地址。
+func fetchAndNormalizeSpec(rawURL string, insecure bool) (content, specURL, kind string, warnings []string, err error) {
+	u, perr := url.Parse(rawURL)
+	if perr != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", "", "", nil, fmt.Errorf("仅支持 http/https 地址")
+	}
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: insecure},
+		},
+	}
+	fetch := func(target string) (string, error) {
+		resp, err := client.Get(target)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+		if err != nil {
+			return "", err
+		}
+		return string(body), nil
+	}
+	tryNormalize := func(body string) (string, string, []string, bool) {
+		nc, kind, warns, err := openapi.Normalize(body)
+		if err != nil {
+			return "", "", nil, false
+		}
+		return nc, kind, warns, true
+	}
+
+	// 1) 直连:地址本身是规范文档
+	if body, err := fetch(rawURL); err == nil {
+		if content, kind, warns, ok := tryNormalize(body); ok {
+			return content, rawURL, kind, warns, nil
+		}
+	}
+	// 2) 基础地址探测常见规范端点
+	base := strings.TrimSuffix(rawURL, "/")
+	for _, c := range specEndpoints {
+		target := base + c
+		body, err := fetch(target)
+		if err != nil {
+			continue
+		}
+		if content, kind, warns, ok := tryNormalize(body); ok {
+			return content, target, kind, warns, nil
+		}
+	}
+	return "", "", "", nil, fmt.Errorf(
+		"未能从该地址拉取到规范(已尝试直连及 %s),请确认服务已开启文档端点,或直接填写规范文档地址",
+		strings.Join(specEndpoints, " "))
 }
 
 // OpenAPIApply POST /api/projects/:id/import/openapi/apply
@@ -113,7 +253,7 @@ func (s *Server) OpenAPIApply(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	basePath, apis, _, err := openapi.Parse(req.Content)
+	basePath, apis, _, err := openapi.Parse(mustNormalized(req.Content))
 	if err != nil {
 		fail(c, http.StatusBadRequest, err.Error())
 		return

@@ -69,6 +69,7 @@ type Project struct {
 	MockEnabled       bool            `json:"mockEnabled"`
 	GlobalHeaders     []KV            `json:"globalHeaders"`     // 请求 Header 复用(文档/调试)
 	GlobalMockHeaders []KV            `json:"globalMockHeaders"` // Mock 返回 Header
+	SpecUrl           string          `json:"specUrl"`           // 文档同步源(Swagger/OpenAPI 规范地址,空=未设置)
 	SortOrder         int64           `json:"sortOrder"`
 	CreatedAt         int64           `json:"createdAt"`
 	UpdatedAt         int64           `json:"updatedAt"`
