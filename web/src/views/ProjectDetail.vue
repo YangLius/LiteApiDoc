@@ -48,7 +48,7 @@
             <LogsPanel ref="logsRef" :project-id="pid" />
           </el-tab-pane>
           <el-tab-pane label="导入导出" name="transfer" lazy>
-            <TransferPanel :project-id="pid" :project-name="project?.name" :spec-url="project?.specUrl" @changed="reload" />
+            <TransferPanel :project-id="pid" :project-name="project?.name" :spec-url="project?.specUrl" :spec-headers="project?.specHeaders" @changed="reload" />
           </el-tab-pane>
           <el-tab-pane label="设置" name="settings" lazy>
             <SettingsPanel ref="settingsRef" :project-id="pid" :project="project"

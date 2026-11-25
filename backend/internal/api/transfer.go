@@ -126,21 +126,30 @@ func mustNormalized(content string) string {
 // SpecURLAnalyze POST /api/projects/:id/import/spec-url/analyze {url, save, insecure}
 // 从服务地址拉取 Swagger/OpenAPI 规范并分析:先按直连尝试,非规范内容时
 // 自动探测常见规范端点(swagger/doc.json、v3/api-docs 等)。save=true 时把
-// 最终规范地址保存为项目同步源(specUrl),供后续一键同步。
+// 最终规范地址与请求头保存为项目同步源(specUrl/specHeaders),供后续一键同步。
+// headers 为空 map 时清除已存请求头;为 nil 时沿用已存的。
 func (s *Server) SpecURLAnalyze(c *gin.Context) {
 	p, allowed := s.checkEdit(c, pathID(c, "id"))
 	if !allowed {
 		return
 	}
 	var req struct {
-		URL      string `json:"url" binding:"required"`
-		Save     bool   `json:"save"`
-		Insecure bool   `json:"insecure"`
+		URL      string            `json:"url" binding:"required"`
+		Save     bool              `json:"save"`
+		Insecure bool              `json:"insecure"`
+		Headers  map[string]string `json:"headers"` // 拉取规范时附带的请求头(如 Authorization)
 	}
 	if !bindJSON(c, &req) {
 		return
 	}
-	content, specURL, kind, warnings, err := fetchAndNormalizeSpec(req.URL, req.Insecure)
+	effHeaders := req.Headers
+	if effHeaders == nil && p.SpecHeaders != "" { // 未传则沿用已保存的同步源请求头
+		var stored map[string]string
+		if json.Unmarshal([]byte(p.SpecHeaders), &stored) == nil {
+			effHeaders = stored
+		}
+	}
+	content, specURL, kind, warnings, err := fetchAndNormalizeSpec(req.URL, req.Insecure, effHeaders)
 	if err != nil {
 		fail(c, http.StatusBadGateway, err.Error())
 		return
@@ -154,6 +163,13 @@ func (s *Server) SpecURLAnalyze(c *gin.Context) {
 	if req.Save {
 		np := p
 		np.SpecUrl = specURL
+		if req.Headers != nil { // 显式传入才改;nil 保持原值,{} 清空
+			if len(req.Headers) == 0 {
+				np.SpecHeaders = ""
+			} else if b, merr := json.Marshal(req.Headers); merr == nil {
+				np.SpecHeaders = string(b)
+			}
+		}
 		if err := s.Store.UpdateProject(&np); err != nil {
 			fail(c, http.StatusInternalServerError, err.Error())
 			return
@@ -177,8 +193,10 @@ var specEndpoints = []string{
 	"/api/openapi.json",
 }
 
-// fetchAndNormalizeSpec 拉取并归一化规范;url 可为规范直链或服务基础地址。
-func fetchAndNormalizeSpec(rawURL string, insecure bool) (content, specURL, kind string, warnings []string, err error) {	u, perr := url.Parse(rawURL)
+// fetchAndNormalizeSpec 拉取并归一化规范;url 可为规范直链或服务基础地址;
+// headers 为拉取时附带的请求头(受保护的服务,如 OAuth2 Bearer)。
+func fetchAndNormalizeSpec(rawURL string, insecure bool, headers map[string]string) (content, specURL, kind string, warnings []string, err error) {
+	u, perr := url.Parse(rawURL)
 	if perr != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return "", "", "", nil, fmt.Errorf("仅支持 http/https 地址")
 	}
@@ -189,7 +207,16 @@ func fetchAndNormalizeSpec(rawURL string, insecure bool) (content, specURL, kind
 		},
 	}
 	fetch := func(target string) (string, error) {
-		resp, err := client.Get(target)
+		req, rerr := http.NewRequest(http.MethodGet, target, nil)
+		if rerr != nil {
+			return "", rerr
+		}
+		for k, v := range headers { // 认证头等随每个探测请求携带
+			if k != "" {
+				req.Header.Set(k, v)
+			}
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			return "", err
 		}

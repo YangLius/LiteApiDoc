@@ -296,6 +296,7 @@ func decodeProjectPatch(raw []byte) (patch func(*model.Project), err error) {
 		GlobalHeaders     *[]model.KV `json:"globalHeaders"`
 		GlobalMockHeaders *[]model.KV `json:"globalMockHeaders"`
 		SpecUrl           *string     `json:"specUrl"`
+		SpecHeaders       *string     `json:"specHeaders"`
 		SortOrder         *int64      `json:"sortOrder"`
 	}
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -322,6 +323,9 @@ func decodeProjectPatch(raw []byte) (patch func(*model.Project), err error) {
 		}
 		if req.SpecUrl != nil {
 			p.SpecUrl = strings.TrimSpace(*req.SpecUrl)
+		}
+		if req.SpecHeaders != nil {
+			p.SpecHeaders = strings.TrimSpace(*req.SpecHeaders)
 		}
 		if req.SortOrder != nil {
 			p.SortOrder = *req.SortOrder

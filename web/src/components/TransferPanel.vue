@@ -35,6 +35,8 @@
           一键同步:{{ savedSpecUrl }}
         </el-button>
       </div>
+      <el-input v-model="headerLines" type="textarea" :rows="2" class="mono" style="margin-top:8px"
+        placeholder="拉取规范需认证时填请求头,每行一条,格式 Key: value,如 Authorization: Bearer xxx;保存后一键同步自动携带" />
 
       <template v-if="plan">
         <el-alert v-if="plan.specKind" type="success" :closable="false" style="margin-top:12px"
@@ -95,7 +97,8 @@ import { api, useAuth } from '../store'
 const props = defineProps({
   projectId: { type: Number, required: true },
   projectName: { type: String, default: 'project' },
-  specUrl: { type: String, default: '' }
+  specUrl: { type: String, default: '' },
+  specHeaders: { type: String, default: '' }
 })
 const emit = defineEmits(['changed'])
 const auth = useAuth()
@@ -108,6 +111,28 @@ const analyzing = ref(false)
 const applying = ref(false)
 const plan = ref(null)
 const content = ref('')
+
+function storedHeadersToLines(raw) {
+  try {
+    const obj = raw ? JSON.parse(raw) : {}
+    return Object.entries(obj || {}).map(([k, v]) => `${k}: ${v}`).join('\n')
+  } catch { return '' }
+}
+const headerLines = ref(storedHeadersToLines(props.specHeaders))
+
+// 解析“Key: value”每行一条的请求头文本
+function parseHeaderLines() {
+  const out = {}
+  headerLines.value.split('\n').forEach(line => {
+    const i = line.indexOf(':')
+    if (i > 0) {
+      const k = line.slice(0, i).trim()
+      const v = line.slice(i + 1).trim()
+      if (k) out[k] = v
+    }
+  })
+  return out
+}
 // 同步源展示与输入框解耦:保存成功后由父组件刷新 props 生效
 const savedSpecUrl = computed(() => props.specUrl || '')
 
@@ -129,8 +154,12 @@ async function probe(url, save) {
   probing.value = true
   plan.value = null
   try {
+    const headers = parseHeaderLines()
+    // 保存同步源时,空请求头 + 已存有请求头 → 显式传 {} 清除;否则空=undefined 沿用后端已存
+    const hasStored = !!(props.specHeaders && props.specHeaders !== '{}')
+    const payloadHeaders = Object.keys(headers).length ? headers : (save && hasStored ? {} : undefined)
     const d = await api.post(`/projects/${props.projectId}/import/spec-url/analyze`,
-      { url, save: !!save, insecure: insecure.value }, { projectId: props.projectId })
+      { url, save: !!save, insecure: insecure.value, headers: payloadHeaders }, { projectId: props.projectId })
     markActions(d)
     content.value = d.content || ''
     plan.value = d

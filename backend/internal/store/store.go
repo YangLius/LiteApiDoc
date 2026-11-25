@@ -141,6 +141,7 @@ func (s *Store) migrate() error {
 	// 增量列迁移(SQLite 无 IF NOT EXISTS 列语法,重复执行报 duplicate column,忽略)
 	for _, q := range []string{
 		`ALTER TABLE projects ADD COLUMN spec_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN spec_headers TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.DB.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return fmt.Errorf("migrate alter: %w", err)
@@ -212,7 +213,7 @@ func scanProjects(rows *sql.Rows) ([]model.Project, error) {
 		var pwd string
 		var archived, mockEnabled int
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &tags, &pwd, &archived,
-			&mockEnabled, &gh, &gmh, &p.SpecUrl, &p.SortOrder, &p.CreatedAt, &p.UpdatedAt, &p.ApiCount); err != nil {
+			&mockEnabled, &gh, &gmh, &p.SpecUrl, &p.SpecHeaders, &p.SortOrder, &p.CreatedAt, &p.UpdatedAt, &p.ApiCount); err != nil {
 			return nil, err
 		}
 		p.HasPassword = pwd != ""
@@ -235,7 +236,7 @@ func scanProjects(rows *sql.Rows) ([]model.Project, error) {
 	return out, rows.Err()
 }
 
-const projectCols = `id,name,description,tags,access_pwd_hash,archived,mock_enabled,global_headers,global_mock_headers,spec_url,sort_order,created_at,updated_at,
+const projectCols = `id,name,description,tags,access_pwd_hash,archived,mock_enabled,global_headers,global_mock_headers,spec_url,spec_headers,sort_order,created_at,updated_at,
  (SELECT COUNT(*) FROM apis a WHERE a.project_id=projects.id) AS api_count`
 
 // GetProject 查询单个项目。
@@ -276,10 +277,10 @@ func (s *Store) ListProjects() ([]model.Project, error) {
 func (s *Store) CreateProject(p *model.Project, pwdHash string) error {
 	now := nowUnix()
 	res, err := s.DB.Exec(`INSERT INTO projects
-		(name,description,tags,access_pwd_hash,archived,mock_enabled,global_headers,global_mock_headers,spec_url,sort_order,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		(name,description,tags,access_pwd_hash,archived,mock_enabled,global_headers,global_mock_headers,spec_url,spec_headers,sort_order,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.Name, p.Description, mustJSON(p.Tags), pwdHash, boolInt(p.Archived), boolInt(p.MockEnabled),
-		mustJSON(p.GlobalHeaders), mustJSON(p.GlobalMockHeaders), p.SpecUrl, p.SortOrder, now, now)
+		mustJSON(p.GlobalHeaders), mustJSON(p.GlobalMockHeaders), p.SpecUrl, p.SpecHeaders, p.SortOrder, now, now)
 	if err != nil {
 		return err
 	}
@@ -294,9 +295,9 @@ func (s *Store) CreateProject(p *model.Project, pwdHash string) error {
 // UpdateProject 更新项目基础信息(全量字段)。
 func (s *Store) UpdateProject(p *model.Project) error {
 	_, err := s.DB.Exec(`UPDATE projects SET name=?,description=?,tags=?,archived=?,mock_enabled=?,
-		global_headers=?,global_mock_headers=?,spec_url=?,sort_order=?,updated_at=? WHERE id=?`,
+		global_headers=?,global_mock_headers=?,spec_url=?,spec_headers=?,sort_order=?,updated_at=? WHERE id=?`,
 		p.Name, p.Description, mustJSON(p.Tags), boolInt(p.Archived), boolInt(p.MockEnabled),
-		mustJSON(p.GlobalHeaders), mustJSON(p.GlobalMockHeaders), p.SpecUrl, p.SortOrder, nowUnix(), p.ID)
+		mustJSON(p.GlobalHeaders), mustJSON(p.GlobalMockHeaders), p.SpecUrl, p.SpecHeaders, p.SortOrder, nowUnix(), p.ID)
 	return err
 }
 
