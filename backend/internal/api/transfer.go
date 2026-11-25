@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -227,6 +229,12 @@ func (s *Server) SpecURLAnalyze(c *gin.Context) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			defer func() { // 单源异常不应化身为整个进程崩溃
+						if r := recover(); r != nil {
+								log.Printf("[spec-analyze] panic on %s: %v\n%s", u, r, debug.Stack())
+								ch <- indexed{i, specResult{Url: u, Error: fmt.Sprintf("内部异常: %v", r)}}
+						}
+			}()
 			ch <- indexed{i, s.analyzeOneSpec(p.ID, u, req.Insecure, effHeaders)}
 		}(i, u)
 	}

@@ -3,15 +3,17 @@
 package main
 
 import (
-	"context"
-	"flag"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
+"context"
+"flag"
+"fmt"
+"io"
+"log"
+"net/http"
+"os"
+"os/signal"
+"path/filepath"
+"syscall"
+"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -37,6 +39,13 @@ func main() {
 	}
 	if !*dev {
 		gin.SetMode(gin.ReleaseMode)
+	}
+
+	// 日志落文件(同库目录),崩溃时留有现场
+	logFile, _ := os.OpenFile(filepath.Join(filepath.Dir(*dbPath), "liteapidoc.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if logFile != nil {
+		log.SetOutput(io.MultiWriter(os.Stdout, logFile))
+		defer logFile.Close()
 	}
 
 	st, err := store.Open(*dbPath)
