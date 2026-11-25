@@ -33,6 +33,13 @@
         </el-button>
         <el-button type="primary" size="small" :loading="probing" @click="probeInput">探测并分析</el-button>
       </div>
+      <div class="row" style="margin-top:8px">
+        <span class="tip">导入到分组:</span>
+        <el-select v-model="targetGroupId" size="small" style="width:280px">
+          <el-option v-for="g in groupOptions" :key="g.id" :value="g.id" :label="g.label" />
+        </el-select>
+        <span class="tip">同路径已有接口会随导入移入所选分组</span>
+      </div>
       <el-input v-model="headerLines" type="textarea" :rows="2" class="mono" style="margin-top:8px"
         placeholder="拉取规范需认证时填请求头,每行一条,格式 Key: value,如 Authorization: Bearer xxx;保存后一键同步自动携带" />
 
@@ -102,6 +109,12 @@
       <el-button type="primary" size="small" style="margin-top:8px" :loading="analyzing" @click="analyze">
         解析预检
       </el-button>
+      <div class="row" style="margin-top:8px">
+        <span class="tip">导入到分组:</span>
+        <el-select v-model="targetGroupId" size="small" style="width:280px">
+          <el-option v-for="g in groupOptions" :key="g.id" :value="g.id" :label="g.label" />
+        </el-select>
+      </div>
       <template v-if="plan">
         <el-alert v-if="plan.specKind" type="success" :closable="false" style="margin-top:12px"
           :title="`识别为 ${plan.specKind === 'swagger2' ? 'Swagger 2.0(已自动转换)' : 'OpenAPI 3.0'}` +
@@ -144,7 +157,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, useAuth } from '../store'
 
@@ -206,6 +219,40 @@ const savedSources = computed(() => {
 const checkedCount = computed(() => (results.value || []).filter(r => r.checked && !r.error).length)
 const checkedTotal = computed(() => (results.value || []).filter(r => r.checked && !r.error).reduce((a, r) => a + (r.total || 0), 0))
 
+// ---- 导入目标分组:0=未分组,-1=按来源自动建分组,>0=指定分组 ----
+const targetGroupId = ref(0)
+const groups = ref([])
+const groupOptions = computed(() => {
+  const byId = Object.fromEntries(groups.value.map(g => [g.id, g]))
+  return [
+    { id: 0, label: '未分组' },
+    { id: -1, label: '按来源自动建分组(每个文档一个)' },
+    ...groups.value.map(g => ({
+      id: g.id,
+      label: g.parentId && byId[g.parentId] ? `${byId[g.parentId].name} / ${g.name}` : g.name
+    }))
+  ]
+})
+async function loadGroups() {
+  try { groups.value = await api.get(`/projects/${props.projectId}/groups`, { projectId: props.projectId }) || [] } catch { /* 分组加载失败不阻塞导入 */ }
+}
+onMounted(loadGroups)
+
+// 解析某来源的目标分组;-1 模式按文档标题建/复用根分组(“管家婆财贸/工贸 CM 开放 API”等)
+async function resolveGroupId(row) {
+  if (targetGroupId.value > 0) return targetGroupId.value
+  if (targetGroupId.value === -1) {
+    const name = ((row.title || '').trim().slice(0, 30)) || '导入接口'
+    let g = groups.value.find(x => !x.parentId && x.name === name)
+    if (!g) {
+      g = await api.post(`/projects/${props.projectId}/groups`, { name, parentId: 0 }, { projectId: props.projectId })
+      groups.value.push(g)
+    }
+    return g.id
+  }
+  return 0
+}
+
 function pickFile(ev) {
   const f = ev.target.files?.[0]
   if (!f) return
@@ -250,9 +297,10 @@ async function applyChecked() {
     let created = 0, updated = 0, skipped = 0
     const allConflicts = []
     for (const r of rows) {
+      const gid = await resolveGroupId(r)
       const decisions = r.items.map(it => ({ method: it.method, path: it.path, action: it.action || 'overwrite' }))
       const d = await api.post(`/projects/${props.projectId}/import/openapi/apply`,
-        { analysisId: r.analysisId, decisions }, { projectId: props.projectId })
+        { analysisId: r.analysisId, groupId: gid || undefined, decisions }, { projectId: props.projectId })
       created += d.created; updated += d.updated; skipped += d.skipped
       if (d.conflicts?.length) allConflicts.push(...d.conflicts)
     }
@@ -285,9 +333,10 @@ async function syncSaved() {
     let created = 0, updated = 0, skipped = 0
     const allConflicts = []
     for (const r of okRows) {
+      const gid = await resolveGroupId(r)
       const decisions = r.items.map(it => ({ method: it.method, path: it.path, action: 'overwrite' }))
       const d = await api.post(`/projects/${props.projectId}/import/openapi/apply`,
-        { analysisId: r.analysisId, decisions }, { projectId: props.projectId })
+        { analysisId: r.analysisId, groupId: gid || undefined, decisions }, { projectId: props.projectId })
       created += d.created; updated += d.updated; skipped += d.skipped
       if (d.conflicts?.length) allConflicts.push(...d.conflicts)
     }
@@ -319,7 +368,7 @@ async function apply() {
   try {
     const decisions = plan.value.items.map(it => ({ method: it.method, path: it.path, action: it.action }))
     const d = await api.post(`/projects/${props.projectId}/import/openapi/apply`,
-      { content: content.value, decisions }, { projectId: props.projectId })
+      { content: content.value, groupId: targetGroupId.value > 0 ? targetGroupId.value : undefined, decisions }, { projectId: props.projectId })
     let msg = `新建 ${d.created},更新 ${d.updated},跳过 ${d.skipped}`
     if (d.conflicts?.length) msg += `,模板冲突 ${d.conflicts.length}:${d.conflicts.join('、')}`
     ElMessage.success('导入完成:' + msg)

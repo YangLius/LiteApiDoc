@@ -476,6 +476,7 @@ func (s *Server) OpenAPIApply(c *gin.Context) {
 	var req struct {
 		Content    string `json:"content"`
 		AnalysisID string `json:"analysisId"` // spec-url 分析缓存 ID(免回传大规范内容)
+		GroupID    int64  `json:"groupId"`   // 导入目标分组(0=未分组;>0 时已有同路径接口也移入该组)
 		Decisions []struct {
 			Method string `json:"method"`
 			Path   string `json:"path"`
@@ -512,11 +513,15 @@ func (s *Server) OpenAPIApply(c *gin.Context) {
 			continue
 		}
 		na := parsedToApi(p.ID, basePath, pa)
+		na.GroupID = req.GroupID // 新接口落入指定分组(0=未分组)
 		isUpdate := false
 		existing, err := s.Store.FindApiByMethodPath(p.ID, na.Method, na.Path)
 		if err == nil {
 			isUpdate = true
-			na.ID, na.GroupID, na.SortOrder, na.CreatedAt = existing.ID, existing.GroupID, existing.SortOrder, existing.CreatedAt
+			na.ID, na.SortOrder, na.CreatedAt = existing.ID, existing.SortOrder, existing.CreatedAt
+			if req.GroupID <= 0 {
+				na.GroupID = existing.GroupID // 未显式指定分组时,保留已有归属
+			}
 			err = s.Store.UpdateApi(&na)
 		} else {
 			err = s.Store.CreateApi(&na)
