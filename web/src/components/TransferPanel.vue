@@ -33,6 +33,14 @@
         </el-button>
         <el-button type="primary" size="small" :loading="probing" @click="probeInput">探测并分析</el-button>
       </div>
+      <div v-if="savedSources.length" class="row" style="margin-top:6px">
+        <span class="tip">已保存同步源 {{ savedSources.length }} 个(一键同步使用,不回填上方输入框)</span>
+        <el-tooltip placement="top">
+          <template #content><div style="max-width:440px;white-space:pre-line">{{ savedSources.join('\n') }}</div></template>
+          <el-button link type="primary" size="small">查看</el-button>
+        </el-tooltip>
+        <el-button link type="danger" size="small" @click="clearSavedSources">清除</el-button>
+      </div>
       <div class="row" style="margin-top:8px">
         <span class="tip">导入到分组:</span>
         <el-select v-model="targetGroupId" size="small" style="width:280px">
@@ -170,14 +178,8 @@ const props = defineProps({
 const emit = defineEmits(['changed'])
 const auth = useAuth()
 
-// 展示同步源输入:单地址原样;JSON 数组(多源)拆成每行一个
-function displaySpecUrl(raw) {
-  if (raw && raw.startsWith('[')) {
-    try { return JSON.parse(raw).join('\n') } catch { return raw }
-  }
-  return raw || ''
-}
-const specUrlInput = ref(displaySpecUrl(props.specUrl))
+// 地址输入框默认留空;已保存的同步源单独展示在下方“已保存同步源”行,不回填输入框
+const specUrlInput = ref('')
 const saveSource = ref(true)
 const insecure = ref(false)
 const probing = ref(false)
@@ -216,6 +218,18 @@ const savedSources = computed(() => {
   }
   return v ? [v] : []
 })
+
+// 清除已保存的同步源(一键同步将不可用,可重新探测并勾选保存)
+async function clearSavedSources() {
+  try {
+    await ElMessageBox.confirm('清除后「一键同步」将不可用(仍可在地址框重新探测导入)。确认清除?', '清除同步源', { type: 'warning', confirmButtonText: '清除' })
+  } catch { return }
+  try {
+    await api.patch(`/projects/${props.projectId}`, { specUrl: '' }, { projectId: props.projectId })
+    ElMessage.success('已清除同步源')
+    emit('changed')
+  } catch (e) { ElMessage.error(e.message) }
+}
 const checkedCount = computed(() => (results.value || []).filter(r => r.checked && !r.error).length)
 const checkedTotal = computed(() => (results.value || []).filter(r => r.checked && !r.error).reduce((a, r) => a + (r.total || 0), 0))
 
