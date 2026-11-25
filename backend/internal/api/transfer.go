@@ -178,8 +178,7 @@ var specEndpoints = []string{
 }
 
 // fetchAndNormalizeSpec 拉取并归一化规范;url 可为规范直链或服务基础地址。
-func fetchAndNormalizeSpec(rawURL string, insecure bool) (content, specURL, kind string, warnings []string, err error) {
-	u, perr := url.Parse(rawURL)
+func fetchAndNormalizeSpec(rawURL string, insecure bool) (content, specURL, kind string, warnings []string, err error) {	u, perr := url.Parse(rawURL)
 	if perr != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return "", "", "", nil, fmt.Errorf("仅支持 http/https 地址")
 	}
@@ -230,9 +229,86 @@ func fetchAndNormalizeSpec(rawURL string, insecure bool) (content, specURL, kind
 			return content, target, kind, warns, nil
 		}
 	}
+	// 3) 文档页面发现:FastAPI /docs、swagger-ui 页面内写明真实规范地址
+	if content, specURL, kind, warns, ok := discoverFromPages(base, fetch, tryNormalize); ok {
+		return content, specURL, kind, warns, nil
+	}
 	return "", "", "", nil, fmt.Errorf(
-		"未能从该地址拉取到规范(已尝试直连及 %s),请确认服务已开启文档端点,或直接填写规范文档地址",
-		strings.Join(specEndpoints, " "))
+		"未能从该地址拉取到规范(已尝试直连、常见端点及 /docs 页面自动发现),请确认服务已开启文档,或直接填写规范文档地址")
+}
+
+// discoveryPages swagger 文档页面候选(页面 HTML 内会写明真实规范地址)。
+var discoveryPages = []string{
+	"/docs",            // FastAPI 默认文档页(SwaggerUIBundle({url: ...}))
+	"/redoc",            // FastAPI ReDoc 页(spec-url 属性)
+	"/swagger-ui.html", // 传统 swagger-ui
+	"/swagger-ui/",      // springdoc swagger-ui
+}
+
+var (
+	reOpenapiURL  = regexp.MustCompile(`openapi_url["']?\s*[:=]\s*["']([^"']+)["']`)
+	reSwaggerUIURL = regexp.MustCompile(`SwaggerUIBundle\(\{[^}]*?\b["']?url["']?\s*:\s*["']([^"']+)["']`)
+	reReDocURL    = regexp.MustCompile(`spec-url=["']([^"']+)["']`)
+	reConfigURL   = regexp.MustCompile(`configUrl["']?\s*[:=]\s*["']([^"']+)["']`)
+	reSpecURL     = regexp.MustCompile(`"url"\s*:\s*"([^"]+)"`)
+)
+
+// resolveSpecRef 把页面里提取的地址解析为绝对地址;无法解析返回空。
+func resolveSpecRef(base, ref string) string {
+	if ref == "" {
+		return ""
+	}
+	if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
+		return ref
+	}
+	if strings.HasPrefix(ref, "/") {
+		return base + ref
+	}
+	return ""
+}
+
+// discoverFromPages 拉取文档页面,从 HTML 中提取真实规范地址并验证。
+func discoverFromPages(base string, fetch func(string) (string, error),
+	tryNormalize func(string) (string, string, []string, bool)) (string, string, string, []string, bool) {
+	seen := map[string]bool{}
+	for _, page := range discoveryPages {
+		html, err := fetch(base + page)
+		if err != nil || !strings.Contains(html, "<") { // 只处理 HTML 页面
+			continue
+		}
+		var cands []string
+		if m := reOpenapiURL.FindStringSubmatch(html); m != nil { // 部分模板字面渲染 openapi_url 配置
+			cands = append(cands, m[1])
+		}
+		if m := reSwaggerUIURL.FindStringSubmatch(html); m != nil { // FastAPI: SwaggerUIBundle({url: '/api/v1/openapi.json'})
+			cands = append(cands, m[1])
+		}
+		if m := reReDocURL.FindStringSubmatch(html); m != nil { // ReDoc: <redoc spec-url="...">
+			cands = append(cands, m[1])
+		}
+		if m := reConfigURL.FindStringSubmatch(html); m != nil { // springdoc: configUrl → {"url":"..."}
+			if cfg, err := fetch(resolveSpecRef(base, m[1])); err == nil {
+				if mm := reSpecURL.FindStringSubmatch(cfg); mm != nil {
+					cands = append(cands, mm[1])
+				}
+			}
+		}
+		for _, c := range cands {
+			target := resolveSpecRef(base, c)
+			if target == "" || seen[target] {
+				continue
+			}
+			seen[target] = true
+			body, err := fetch(target)
+			if err != nil {
+				continue
+			}
+			if content, kind, warns, ok := tryNormalize(body); ok {
+				return content, target, kind, warns, true
+			}
+		}
+	}
+	return "", "", "", nil, false
 }
 
 // OpenAPIApply POST /api/projects/:id/import/openapi/apply

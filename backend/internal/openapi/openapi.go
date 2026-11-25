@@ -1,5 +1,5 @@
-// Package openapi 实现 OpenAPI 3.0(x) 文档的导入解析与导出构建。
-// 仅支持 3.0.x;yaml/json 通吃(yaml 是 json 超集)。
+// Package openapi 实现 OpenAPI 3.x 文档的导入解析与导出构建。
+// 支持 3.0.x / 3.1.x(FastAPI 默认产出 3.1);yaml/json 通吃(yaml 是 json 超集)。
 package openapi
 
 import (
@@ -40,8 +40,8 @@ func Parse(content string) (basePath string, apis []ParsedApi, title string, err
 		return "", nil, "", fmt.Errorf("文档内容为空")
 	}
 	ver, _ := root["openapi"].(string)
-	if !strings.HasPrefix(ver, "3.0") {
-		return "", nil, "", fmt.Errorf("仅支持 OpenAPI 3.0.x,当前版本为 %q", ver)
+	if !strings.HasPrefix(ver, "3.") {
+		return "", nil, "", fmt.Errorf("仅支持 OpenAPI 3.x(3.0/3.1),当前版本为 %q", ver)
 	}
 
 	if info, ok := root["info"].(map[string]any); ok {

@@ -25,7 +25,7 @@
       <div class="row">
         <el-input v-model="specUrlInput" class="mono" size="small"
           placeholder="http://192.168.1.10:8080 或 http://…/swagger/doc.json" clearable />
-        <el-button type="primary" size="small" :loading="probing" @click="probe">探测并分析</el-button>
+        <el-button type="primary" size="small" :loading="probing" @click="probeInput">探测并分析</el-button>
       </div>
       <div class="row" style="margin-top:8px">
         <el-checkbox v-model="saveSource" size="small">保存为同步源(存入项目设置)</el-checkbox>

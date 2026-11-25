@@ -34,7 +34,7 @@ func Normalize(content string) (out string, kind string, warnings []string, err 
 	friendly := toJSONFriendly(root)
 	root, _ = friendly.(map[string]any)
 	switch {
-	case strings.HasPrefix(str(root["openapi"]), "3.0"):
+	case strings.HasPrefix(str(root["openapi"]), "3."): // 3.0.x / 3.1.x(FastAPI 默认产出 3.1)
 		kind = "openapi3"
 	case str(root["swagger"]) == "2.0":
 		kind = "swagger2"
