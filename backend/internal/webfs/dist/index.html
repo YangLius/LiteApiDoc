@@ -1,19 +1,13 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<title>LiteApiDoc</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LiteApiDoc</title>
+  <script type="module" crossorigin src="/assets/index-Fzibasnz.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-CTXmYhVJ.css">
 </head>
-<body style="font-family:system-ui,sans-serif;max-width:640px;margin:80px auto;padding:0 20px;color:#333">
-<h2>LiteApiDoc 前端尚未构建</h2>
-<p>当前嵌入的是占位页面。请先构建前端并重新编译后端:</p>
-<pre style="background:#f5f7fa;padding:12px;border-radius:6px">./build.sh          # 一键构建(推荐)
-# 或手动:
-cd web && npm install && npm run build
-cd ../backend
-rm -rf internal/webfs/dist && mkdir -p internal/webfs/dist
-cp -r ../web/dist internal/webfs/dist
-go build -o liteapidoc .</pre>
-<p>构建后重新访问即可看到完整界面。接口状态可通过 <code>GET /api/meta</code> 查看。</p>
+<body>
+  <div id="app"></div>
 </body>
 </html>

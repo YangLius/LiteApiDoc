@@ -8,8 +8,7 @@
       </div>
       <div class="actions">
         <el-button text @click="$router.push('/settings')"><el-icon><Setting /></el-icon>&nbsp;平台设置</el-button>
-        <el-button v-if="auth.isAdmin" text type="danger" @click="logoutAdmin">退出管理身份</el-button>
-        <el-button v-else text @click="openAdmin('login')"><el-icon><User /></el-icon>&nbsp;管理员登录</el-button>
+        <el-button text type="danger" @click="logoutAdmin">退出登录</el-button>
       </div>
     </header>
 
@@ -71,20 +70,6 @@
       </template>
     </el-dialog>
 
-    <!-- 平台管理密码:首次设置 / 登录 -->
-    <el-dialog v-model="adminDlgVisible" :title="adminMode === 'setup' ? '设置平台管理密码' : '管理员登录'" width="420px">
-      <el-form>
-        <el-form-item :label="adminMode === 'setup' ? '设置密码' : '管理密码'">
-          <el-input v-model="adminPwd" show-password @keyup.enter="doAdmin" />
-          <div class="tip" v-if="adminMode === 'setup'">首次启动设置;用于新建/删除项目、全局设置等管理操作</div>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="adminDlgVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="doAdmin">确定</el-button>
-      </template>
-    </el-dialog>
-
     <!-- 导入项目备份 -->
     <el-dialog v-model="importVisible" title="导入项目备份(平台 JSON)" width="560px">
       <el-alert type="info" :closable="false" style="margin-bottom:12px"
@@ -113,13 +98,9 @@ const kw = ref('')
 const projects = ref([])
 const saving = ref(false)
 const createVisible = ref(false)
-const adminDlgVisible = ref(false)
-const adminMode = ref('login') // setup | login
-const adminPwd = ref('')
 const importVisible = ref(false)
 const importContent = ref('')
 const form = reactive({ name: '', description: '', tags: [], password: '' })
-let pendingAfterAdmin = null
 
 const filtered = computed(() => {
   const k = kw.value.trim().toLowerCase()
@@ -130,44 +111,20 @@ const filtered = computed(() => {
 
 async function load() {
   await auth.loadMeta().catch(() => {})
+  // 缓存的 meta 可能过时(服务端重装/删库后回到未初始化态),兜底跳初始化页
+  if (!auth.meta?.adminInitialized) { router.replace('/setup'); return }
   projects.value = await api.get('/projects').catch(() => [])
 }
 onMounted(load)
 
 function logoutAdmin() {
   auth.setAdminToken('')
-  ElMessage.success('已退出管理身份')
-}
-
-function openAdmin(mode, after) {
-  adminMode.value = mode
-  adminPwd.value = ''
-  pendingAfterAdmin = after || null
-  adminDlgVisible.value = true
-}
-
-async function doAdmin() {
-  if (!adminPwd.value) return
-  saving.value = true
-  try {
-    const data = adminMode.value === 'setup'
-      ? await api.post('/auth/admin/setup', { password: adminPwd.value })
-      : await api.post('/auth/admin/login', { password: adminPwd.value })
-    auth.setAdminToken(data.token)
-    await auth.loadMeta()
-    adminDlgVisible.value = false
-    ElMessage.success(adminMode.value === 'setup' ? '平台管理密码已设置' : '已获得管理员权限')
-    if (pendingAfterAdmin) { const fn = pendingAfterAdmin; pendingAfterAdmin = null; fn() }
-  } catch (e) {
-    ElMessage.error(e.message)
-  } finally { saving.value = false }
+  router.replace('/login')
 }
 
 function openCreate() {
   form.name = ''; form.description = ''; form.tags = []; form.password = ''
-  if (!meta.value?.adminInitialized) { openAdmin('setup', () => { createVisible.value = true }) }
-  else if (!auth.isAdmin) { openAdmin('login', () => { createVisible.value = true }) }
-  else createVisible.value = true
+  createVisible.value = true
 }
 
 async function doCreate() {
@@ -179,8 +136,7 @@ async function doCreate() {
     ElMessage.success('项目已创建')
     router.push('/p/' + p.id)
   } catch (e) {
-    if (e.needUnlock) openAdmin('login', () => doCreate())
-    else ElMessage.error(e.message)
+    ElMessage.error(e.message)
   } finally { saving.value = false }
 }
 
@@ -205,8 +161,7 @@ async function delProject(p) {
     ElMessage.success('已删除')
     load()
   } catch (e) {
-    if (e.needUnlock) openAdmin('login', () => delProject(p))
-    else ElMessage.error(e.message)
+    ElMessage.error(e.message)
   }
 }
 
@@ -229,8 +184,7 @@ async function doImport() {
     if (data.warnings?.length) console.warn('导入警告:', data.warnings)
     load()
   } catch (e) {
-    if (e.needUnlock) openAdmin('login', () => doImport())
-    else ElMessage.error(e.message)
+    ElMessage.error(e.message)
   } finally { saving.value = false }
 }
 </script>

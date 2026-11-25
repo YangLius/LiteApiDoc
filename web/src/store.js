@@ -1,6 +1,7 @@
 // 极简全局状态:双密码模型的 token 管理(浏览器本地记忆,PRD 第二章)
 import { defineStore } from "pinia";
 import axios from "axios";
+import { gotoLogin } from "./redirector";
 
 // localStorage 可能被手动改坏,损坏时回退 null 而不是让应用崩溒
 function safeParse(raw) {
@@ -75,11 +76,22 @@ api.interceptors.response.use(
   },
   (err) => {
     const body = err.response?.data;
+    const cfg = err.config || {};
     const msg = body?.msg || err.message || "网络错误";
+    // 管理 token 失效/过期:清除本地状态,经跳转桥回登录页(项目请求不走此分支,
+    // 由 needUnlock 触发项目密码解锁弹窗)。回跳目标经 sessionStorage 传递,
+    // 消费端(Login.vue)校验站内路径,杜绝开放重定向
+    if (err.response?.status === 401 && cfg.adminAuth) {
+      useAuth().setAdminToken("");
+      if (!location.pathname.startsWith("/login") && !location.pathname.startsWith("/setup")) {
+        sessionStorage.setItem("lat_login_next", location.pathname + location.search);
+        gotoLogin();
+      }
+    }
     const e = Object.assign(new Error(msg), {
       status: err.response?.status,
       body,
-      needUnlock: err.response?.status === 401,
+      needUnlock: err.response?.status === 401 && !cfg.adminAuth,
     });
     return Promise.reject(e);
   },

@@ -5,8 +5,7 @@
         <el-icon><Back /></el-icon>&nbsp;{{ meta?.title || 'LiteApiDoc' }}
       </div>
       <div class="grow"></div>
-      <el-button v-if="!auth.isAdmin" type="primary" @click="openAdmin">管理员登录</el-button>
-      <el-tag v-else type="success">管理员身份</el-tag>
+      <el-tag type="success">管理员身份</el-tag>
     </header>
 
     <main class="main" v-if="auth.isAdmin">
@@ -47,16 +46,10 @@
     </main>
 
     <main class="main" v-else>
-      <el-empty description="此页面需要管理员权限" />
+      <el-empty description="此页面需要管理员权限,请先登录">
+        <el-button type="primary" @click="$router.push('/login')">前往登录</el-button>
+      </el-empty>
     </main>
-
-    <el-dialog v-model="adminDlg" title="管理员登录" width="420px">
-      <el-input v-model="adminPwd" placeholder="平台管理密码" show-password @keyup.enter="doAdmin" />
-      <template #footer>
-        <el-button @click="adminDlg = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="doAdmin">登录</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -69,8 +62,6 @@ const auth = useAuth()
 const meta = computed(() => auth.meta)
 const info = ref({ version: '-', dbPath: '-', mockPort: '-' })
 const saving = ref(false)
-const adminDlg = ref(false)
-const adminPwd = ref('')
 const form = reactive({ title: '', logo: '', mockPort: '', mockCorsOrigins: '' })
 
 async function load() {
@@ -82,18 +73,6 @@ async function load() {
   info.value = { version: s.version, dbPath: s.dbPath, mockPort: s.mockPort }
 }
 onMounted(load)
-
-function openAdmin() { adminPwd.value = ''; adminDlg.value = true }
-
-async function doAdmin() {
-  saving.value = true
-  try {
-    const d = await api.post('/auth/admin/login', { password: adminPwd.value })
-    auth.setAdminToken(d.token)
-    adminDlg.value = false
-    load()
-  } catch (e) { ElMessage.error(e.message) } finally { saving.value = false }
-}
 
 async function save() {
   saving.value = true
