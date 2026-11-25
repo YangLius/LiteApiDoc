@@ -1,22 +1,7 @@
 <template>
   <div class="panel">
-    <div class="sec">
-      <h4>导出</h4>
-      <div class="row">
-        <el-button size="small" @click="exportFile(`projects/${projectId}/export/openapi?format=yaml`, 'yaml')">
-          OpenAPI 3.0 (yaml)
-        </el-button>
-        <el-button size="small" @click="exportFile(`projects/${projectId}/export/openapi?format=json`, 'json')">
-          OpenAPI 3.0 (json)
-        </el-button>
-        <el-button size="small" @click="exportFile(`projects/${projectId}/export/json`, 'json')">项目备份 (JSON)</el-button>
-        <el-button size="small" @click="exportFile(`projects/${projectId}/export/html`, 'html')">离线 HTML 文档</el-button>
-      </div>
-      <div class="tip">导出 OpenAPI 时,Mock 专属配置(延时/强制错误码/自定义返回/废弃模式)无法映射,将被丢弃;公共路径前缀写回 servers</div>
-    </div>
-
-    <div class="sec">
-      <h4>从服务地址导入(自动探测 Swagger / OpenAPI)</h4>
+    <el-tabs v-model="subTab">
+      <el-tab-pane label="服务地址导入" name="url">
       <div class="tip" style="margin:0 0 8px">
         每行一个地址,支持批量导入一个网关下的多套文档;可填服务基础地址(自动探测
         openapi.json、swagger/doc.json、/docs 页面等)或规范直链。Swagger 2.0 自动转换,
@@ -107,10 +92,9 @@
           <el-button size="small" type="primary" :loading="applying" @click="applyChecked">导入勾选来源</el-button>
         </div>
       </template>
-    </div>
+      </el-tab-pane>
 
-    <div class="sec">
-      <h4>导入 OpenAPI 3.0 / Swagger 2.0(yaml / json)</h4>
+      <el-tab-pane label="粘贴 / 文件导入" name="paste">
       <input type="file" accept=".yaml,.yml,.json" @change="pickFile" />
       <el-input v-model="content" type="textarea" :rows="6" class="mono" style="margin-top:8px"
         placeholder="或直接粘贴 OpenAPI / Swagger 内容;$ref 自动内联,Servers 中的 basePath 会自动拼接到接口路径" />
@@ -160,7 +144,22 @@
           <el-button size="small" type="primary" :loading="applying" @click="apply">按上述动作导入</el-button>
         </div>
       </template>
-    </div>
+      </el-tab-pane>
+
+      <el-tab-pane label="导出" name="export">
+        <div class="row">
+          <el-button size="small" @click="exportFile(`projects/${projectId}/export/openapi?format=yaml`, 'yaml')">
+            OpenAPI 3.0 (yaml)
+          </el-button>
+          <el-button size="small" @click="exportFile(`projects/${projectId}/export/openapi?format=json`, 'json')">
+            OpenAPI 3.0 (json)
+          </el-button>
+          <el-button size="small" @click="exportFile(`projects/${projectId}/export/json`, 'json')">项目备份 (JSON)</el-button>
+          <el-button size="small" @click="exportFile(`projects/${projectId}/export/html`, 'html')">离线 HTML 文档</el-button>
+        </div>
+        <div class="tip">导出 OpenAPI 时,Mock 专属配置(延时/强制错误码/自定义返回/废弃模式)无法映射,将被丢弃;公共路径前缀写回 servers</div>
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 
@@ -178,6 +177,8 @@ const props = defineProps({
 const emit = defineEmits(['changed'])
 const auth = useAuth()
 
+// 面板内子标签页:url=服务地址导入 / paste=粘贴·文件导入 / export=导出
+const subTab = ref('url')
 // 地址输入框默认留空;已保存的同步源单独展示在下方“已保存同步源”行,不回填输入框
 const specUrlInput = ref('')
 const saveSource = ref(true)
