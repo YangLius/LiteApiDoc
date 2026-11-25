@@ -16,6 +16,34 @@ import (
 
 const maxRefDepth = 24 // 自引用/循环 schema 的内联深度上限
 
+// 内联总预算:防御指数级 schema 展开把内存/时间拖塌(正常规范远用不到)
+const maxInlineTotal = 200000
+
+// inlineBudget 内联次数预算,跨递归共享。
+type inlineBudget struct{ left int }
+
+// deepCopy 深拷贝 map/slice 结构,标量直接返回。
+// 内联时必须深拷贝:若浅拷贝共享原文档子对象指针,自引用 schema 会在原地替换中
+// 构造出对象图自环(无 $ref 字符串可拦截),遍历无限递归直至栈溢出。
+func deepCopy(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, vv := range t {
+			out[k] = deepCopy(vv)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, vv := range t {
+			out[i] = deepCopy(vv)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
 // Normalize 将内容归一化为 OpenAPI 3.0 JSON:
 //   - OpenAPI 3.0.x:原样保留结构,全量内联 $ref;
 //   - Swagger 2.0:转换为 OpenAPI 3.0(host/basePath/schemes→servers、body 参数→requestBody、
@@ -48,7 +76,7 @@ func Normalize(content string) (out string, kind string, warnings []string, err 
 	}
 
 	seen := map[string]bool{}
-	inlineRefs(root, root, 0, seen, &warnings)
+	inlineRefs(root, root, 0, seen, &warnings, &inlineBudget{left: maxInlineTotal})
 
 	b, err := json.Marshal(root)
 	if err != nil {
@@ -108,7 +136,7 @@ func scalarKeyString(k any) string {
 // inlineRefs 深度优先遍历,把 map 中的 {"$ref": "#/a/b"} 节点替换为解析后的完整内容。
 // 兄弟键(description 等)覆盖在解析结果之上;$ref 解析失败保留原样并记录警告;
 // 深度超过 maxRefDepth 视为循环引用,停止内联该分支。
-func inlineRefs(node any, root map[string]any, depth int, seen map[string]bool, warnings *[]string) {
+func inlineRefs(node any, root map[string]any, depth int, seen map[string]bool, warnings *[]string, budget *inlineBudget) {
 	switch t := node.(type) {
 	case map[string]any:
 		if ref, ok := t["$ref"].(string); ok && strings.HasPrefix(ref, "#/") {
@@ -129,10 +157,18 @@ func inlineRefs(node any, root map[string]any, depth int, seen map[string]bool, 
 				}
 				return
 			}
+			if budget.left <= 0 {
+				key := "budget"
+				if !seen[key] {
+					seen[key] = true
+					*warnings = append(*warnings, "引用展开总量超出预算,已停止内联(文档结构保持引用形式)")
+				}
+				return
+			}
 			merged := map[string]any{}
 			if rm, ok := resolved.(map[string]any); ok {
 				for k, v := range rm {
-					merged[k] = v
+					merged[k] = deepCopy(v) // 深拷贝,切断与原文档的指针共享(防自环)
 				}
 			} else {
 				return // 目标不是对象,无法合并,保持原样
@@ -149,6 +185,7 @@ func inlineRefs(node any, root map[string]any, depth int, seen map[string]bool, 
 			for k, v := range merged {
 				t[k] = v
 			}
+			budget.left--
 		}
 		keys := make([]string, 0, len(t))
 		for k := range t {
@@ -156,11 +193,11 @@ func inlineRefs(node any, root map[string]any, depth int, seen map[string]bool, 
 		}
 		sort.Strings(keys) // 稳定顺序,避免 map 遍历不确定性导致深度差异
 		for _, k := range keys {
-			inlineRefs(t[k], root, depth+1, seen, warnings)
+			inlineRefs(t[k], root, depth+1, seen, warnings, budget)
 		}
 	case []any:
 		for i := range t {
-			inlineRefs(t[i], root, depth+1, seen, warnings)
+			inlineRefs(t[i], root, depth+1, seen, warnings, budget)
 		}
 	}
 }
