@@ -1,0 +1,21 @@
+# 依赖与前端构建产物
+web/node_modules/
+web/dist/
+backend/internal/webfs/dist/assets/
+
+# 运行时数据(SQLite)
+data/
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+
+# 编译产物
+backend/liteapidoc
+*.exe
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
