@@ -88,14 +88,55 @@ func sortApis(apis []ParsedApi) {
 	})
 }
 
+// hasCJK 判断字符串是否含中日韩字符。
+func hasCJK(s string) bool {
+	for _, r := range s {
+		if r >= 0x4E00 && r <= 0x9FFF {
+			return true
+		}
+	}
+	return false
+}
+
+// nameFromDesc 取描述第一行作为接口名,超长截断。
+func nameFromDesc(desc string) string {
+	if i := strings.IndexByte(desc, '\n'); i >= 0 {
+		desc = desc[:i]
+	}
+	desc = strings.TrimSpace(desc)
+	if r := []rune(desc); len(r) > 60 {
+		desc = string(r[:60]) + "…"
+	}
+	return desc
+}
+
+// pickName 接口命名优先级:summary 与 description 都可能有中英文。
+// FastAPI 等框架在未显式指定 summary 时会从函数名自动生成英文 summary,
+// 而真正的中文描述在 description(docstring)里 —— 此时优先用中文 description;
+// 否则用 summary;都没有时回退 method+path。
+func pickName(summary, desc, method, path string) string {
+	summary = strings.TrimSpace(summary)
+	desc = strings.TrimSpace(desc)
+	if summary != "" && (hasCJK(summary) || !hasCJK(desc)) {
+		return summary
+	}
+	if desc != "" && hasCJK(desc) {
+		if n := nameFromDesc(desc); n != "" {
+			return n
+		}
+	}
+	if summary != "" {
+		return summary
+	}
+	return method + " " + path
+}
+
 func buildParsedApi(path, method string, op map[string]any, pathLevelParams []map[string]any) ParsedApi {
 	a := ParsedApi{Method: strings.ToUpper(method), Path: normalizePath(path)}
-	if s, ok := op["summary"].(string); ok && s != "" {
-		a.Name = s
-	} else {
-		a.Name = method + " " + path
-	}
-	if d, ok := op["description"].(string); ok {
+	summary, _ := op["summary"].(string)
+	desc, _ := op["description"].(string)
+	a.Name = pickName(summary, desc, method, path)
+	if d := strings.TrimSpace(desc); d != "" {
 		a.Remark = d
 	}
 

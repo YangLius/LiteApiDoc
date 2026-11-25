@@ -543,6 +543,7 @@ func parsedToApi(projectID int64, basePath string, pa openapi.ParsedApi) model.A
 	a := model.Api{
 		ProjectID:  projectID,
 		Name:       pa.Name,
+		Remark:     pa.Remark, // OpenAPI description → 接口备注
 		Method:     pa.Method,
 		Path:       joinBase(basePath, pa.Path),
 		Status:     model.ApiStatusDeveloping,
