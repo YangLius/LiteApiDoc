@@ -3,7 +3,9 @@ package api
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -13,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -123,23 +126,84 @@ func mustNormalized(content string) string {
 	return nc
 }
 
-// SpecURLAnalyze POST /api/projects/:id/import/spec-url/analyze {url, save, insecure}
-// 从服务地址拉取 Swagger/OpenAPI 规范并分析:先按直连尝试,非规范内容时
-// 自动探测常见规范端点(swagger/doc.json、v3/api-docs 等)。save=true 时把
-// 最终规范地址与请求头保存为项目同步源(specUrl/specHeaders),供后续一键同步。
-// headers 为空 map 时清除已存请求头;为 nil 时沿用已存的。
+// specResult 单个地址的分析结果。
+type specResult struct {
+	Url         string     `json:"url"`
+	SpecUrl     string     `json:"specUrl"`
+	SpecKind    string     `json:"specKind"`
+	Title       string     `json:"title"`
+	BasePath    string     `json:"basePath"`
+	Warnings    []string   `json:"warnings"`
+	Items       []specItem `json:"items"`
+	ToCreate    int        `json:"toCreate"`
+	ToOverwrite int        `json:"toOverwrite"`
+	Total       int        `json:"total"`
+	AnalysisId  string     `json:"analysisId"`
+	Error       string     `json:"error"`
+}
+
+// analyzeOneSpec 拉取并解析单个地址;内容存入缓存供 apply 凭 analysisId 引用。
+func (s *Server) analyzeOneSpec(projectID int64, rawURL string, insecure bool, headers map[string]string) specResult {
+	res := specResult{Url: rawURL}
+	content, specURL, kind, warnings, err := fetchAndNormalizeSpec(rawURL, insecure, headers)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	basePath, apis, title, err := openapi.Parse(content)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	items, toCreate, toOverwrite := s.analyzeSpecItems(projectID, basePath, apis)
+	res.SpecUrl, res.SpecKind, res.Title, res.BasePath = specURL, kind, title, basePath
+	res.Warnings, res.Items = warnings, items
+	res.ToCreate, res.ToOverwrite, res.Total = toCreate, toOverwrite, len(items)
+	res.AnalysisId = specCachePut(content)
+	return res
+}
+
+// firstSuccess 返回第一个成功结果;全失败时返回零值。
+func firstSuccess(results []specResult) specResult {
+	for _, r := range results {
+		if r.Error == "" {
+			return r
+		}
+	}
+	return specResult{}
+}
+
+// SpecURLAnalyze POST /api/projects/:id/import/spec-url/analyze {url|urls, save, insecure, headers}
+// 支持批量:urls 每项独立发现+解析(并发拉取,上限 4),返回 results[],内容存缓存
+// (apply 凭 analysisId 引用,免回传大规范)。save=true 时把成功的规范地址与请求头
+// 保存为项目同步源(多个地址存 JSON 数组)。headers 为空 map 清除已存请求头,nil 沿用。
 func (s *Server) SpecURLAnalyze(c *gin.Context) {
 	p, allowed := s.checkEdit(c, pathID(c, "id"))
 	if !allowed {
 		return
 	}
 	var req struct {
-		URL      string            `json:"url" binding:"required"`
+		URL      string            `json:"url"`  // 单地址(向后兼容)
+		URLs     []string          `json:"urls"` // 多地址批量
 		Save     bool              `json:"save"`
 		Insecure bool              `json:"insecure"`
 		Headers  map[string]string `json:"headers"` // 拉取规范时附带的请求头(如 Authorization)
 	}
 	if !bindJSON(c, &req) {
+		return
+	}
+	urls := req.URLs
+	if len(urls) == 0 && strings.TrimSpace(req.URL) != "" {
+		urls = []string{req.URL}
+	}
+	cleaned := make([]string, 0, len(urls))
+	for _, u := range urls {
+		if u = strings.TrimSpace(u); u != "" {
+			cleaned = append(cleaned, u)
+		}
+	}
+	if len(cleaned) == 0 {
+		fail(c, http.StatusBadRequest, "请填写服务地址或规范文档地址")
 		return
 	}
 	effHeaders := req.Headers
@@ -149,37 +213,101 @@ func (s *Server) SpecURLAnalyze(c *gin.Context) {
 			effHeaders = stored
 		}
 	}
-	content, specURL, kind, warnings, err := fetchAndNormalizeSpec(req.URL, req.Insecure, effHeaders)
-	if err != nil {
-		fail(c, http.StatusBadGateway, err.Error())
-		return
+	results := make([]specResult, len(cleaned))
+	type indexed struct {
+		i   int
+		res specResult
 	}
-	basePath, apis, title, err := openapi.Parse(content)
-	if err != nil {
-		fail(c, http.StatusBadRequest, err.Error())
-		return
+	ch := make(chan indexed, len(cleaned)) // 缓冲足够,发送不阻塞
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for i, u := range cleaned {
+		wg.Add(1)
+		go func(i int, u string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			ch <- indexed{i, s.analyzeOneSpec(p.ID, u, req.Insecure, effHeaders)}
+		}(i, u)
 	}
-	items, toCreate, toOverwrite := s.analyzeSpecItems(p.ID, basePath, apis)
+	wg.Wait()
+	close(ch)
+	for it := range ch { // 主协程单点写回,无数据竞争
+		results[it.i] = it.res
+	}
 	if req.Save {
-		np := p
-		np.SpecUrl = specURL
-		if req.Headers != nil { // 显式传入才改;nil 保持原值,{} 清空
-			if len(req.Headers) == 0 {
-				np.SpecHeaders = ""
-			} else if b, merr := json.Marshal(req.Headers); merr == nil {
-				np.SpecHeaders = string(b)
+		saved := make([]string, 0, len(results))
+		for _, r := range results {
+			if r.Error == "" && r.SpecUrl != "" {
+				saved = append(saved, r.SpecUrl)
 			}
 		}
-		if err := s.Store.UpdateProject(&np); err != nil {
-			fail(c, http.StatusInternalServerError, err.Error())
-			return
+		if len(saved) > 0 {
+			np := p
+			if len(saved) == 1 {
+				np.SpecUrl = saved[0]
+			} else if b, merr := json.Marshal(saved); merr == nil {
+				np.SpecUrl = string(b) // 多同步源存 JSON 数组
+			}
+			if req.Headers != nil { // 显式传入才改;nil 保持原值,{} 清空
+				if len(req.Headers) == 0 {
+					np.SpecHeaders = ""
+				} else if b, merr := json.Marshal(req.Headers); merr == nil {
+					np.SpecHeaders = string(b)
+				}
+			}
+			if err := s.Store.UpdateProject(&np); err != nil {
+				fail(c, http.StatusInternalServerError, err.Error())
+				return
+			}
 		}
 	}
+	first := firstSuccess(results)
 	ok(c, gin.H{
-		"specUrl": specURL, "specKind": kind, "title": title, "basePath": basePath,
-		"warnings": warnings, "content": content, "items": items,
-		"toCreate": toCreate, "toOverwrite": toOverwrite, "total": len(items),
+		"results": results,
+		// 顶层兼容字段 = 第一个成功结果(单地址时与旧版一致)
+		"specUrl": first.SpecUrl, "specKind": first.SpecKind, "title": first.Title,
+		"basePath": first.BasePath, "warnings": first.Warnings, "items": first.Items,
+		"toCreate": first.ToCreate, "toOverwrite": first.ToOverwrite, "total": first.Total,
+		"analysisId": first.AnalysisId,
 	})
+}
+
+// specCache spec-url 分析内容的内存缓存:analyze 返回 analysisId,apply 凭 ID
+// 取内容,避免数 MB 的规范在前后端之间来回传输。15 分钟过期,惰性清理。
+type specCacheEntry struct {
+	content   string
+	createdAt time.Time
+}
+
+var specCache sync.Map // analysisId -> specCacheEntry
+
+func specCachePut(content string) string {
+	b := make([]byte, 8)
+	rand.Read(b) // 缓存 ID 仅会话内引用,无加密需求也无妨
+	id := hex.EncodeToString(b)
+	now := time.Now()
+	specCache.Range(func(k, v any) bool {
+		if e, ok := v.(specCacheEntry); ok && now.Sub(e.createdAt) > 15*time.Minute {
+			specCache.Delete(k)
+		}
+		return true
+	})
+	specCache.Store(id, specCacheEntry{content: content, createdAt: now})
+	return id
+}
+
+func specCacheGet(id string) (string, bool) {
+	v, ok := specCache.Load(id)
+	if !ok {
+		return "", false
+	}
+	e := v.(specCacheEntry)
+	if time.Since(e.createdAt) > 15*time.Minute {
+		specCache.Delete(id)
+		return "", false
+	}
+	return e.content, true
 }
 
 // specEndpoints 常见规范端点候选(按生态命中率排序)。
@@ -201,7 +329,7 @@ func fetchAndNormalizeSpec(rawURL string, insecure bool, headers map[string]stri
 		return "", "", "", nil, fmt.Errorf("仅支持 http/https 地址")
 	}
 	client := &http.Client{
-		Timeout: 15 * time.Second,
+		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: insecure},
 		},
@@ -224,7 +352,7 @@ func fetchAndNormalizeSpec(rawURL string, insecure bool, headers map[string]stri
 		if resp.StatusCode != http.StatusOK {
 			return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 		if err != nil {
 			return "", err
 		}
@@ -346,7 +474,8 @@ func (s *Server) OpenAPIApply(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Content   string `json:"content" binding:"required"`
+		Content    string `json:"content"`
+		AnalysisID string `json:"analysisId"` // spec-url 分析缓存 ID(免回传大规范内容)
 		Decisions []struct {
 			Method string `json:"method"`
 			Path   string `json:"path"`
@@ -354,6 +483,15 @@ func (s *Server) OpenAPIApply(c *gin.Context) {
 		} `json:"decisions"`
 	}
 	if !bindJSON(c, &req) {
+		return
+	}
+	if req.Content == "" && req.AnalysisID != "" {
+		if cached, ok := specCacheGet(req.AnalysisID); ok {
+			req.Content = cached
+		}
+	}
+	if req.Content == "" {
+		fail(c, http.StatusBadRequest, "缺少规范内容或有效的分析ID")
 		return
 	}
 	basePath, apis, _, err := openapi.Parse(mustNormalized(req.Content))

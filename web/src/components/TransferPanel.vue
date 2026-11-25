@@ -18,26 +18,90 @@
     <div class="sec">
       <h4>从服务地址导入(自动探测 Swagger / OpenAPI)</h4>
       <div class="tip" style="margin:0 0 8px">
-        填服务基础地址即可自动探测规范端点(swagger/doc.json、v3/api-docs、openapi.json 等),
-        Swagger 2.0 自动转换为 OpenAPI 3;也可直接填规范文档地址。Go swag / Java springdoc / FastAPI
-        等代码注解工具产出的规范均可导入,即"根据代码生成文档"
+        每行一个地址,支持批量导入一个网关下的多套文档;可填服务基础地址(自动探测
+        openapi.json、swagger/doc.json、/docs 页面等)或规范直链。Swagger 2.0 自动转换,
+        代码注解工具(swag / springdoc / FastAPI)产出的规范均可导入
       </div>
-      <div class="row">
-        <el-input v-model="specUrlInput" class="mono" size="small"
-          placeholder="http://192.168.1.10:8080 或 http://…/swagger/doc.json" clearable />
-        <el-button type="primary" size="small" :loading="probing" @click="probeInput">探测并分析</el-button>
-      </div>
+      <el-input v-model="specUrlInput" type="textarea" :rows="3" class="mono"
+        placeholder="http://192.168.1.10:8080&#10;http://host:8155/erp/cm&#10;http://host:8155/erp/hh170/openapi.json" />
       <div class="row" style="margin-top:8px">
-        <el-checkbox v-model="saveSource" size="small">保存为同步源(存入项目设置)</el-checkbox>
+        <el-checkbox v-model="saveSource" size="small">保存为同步源(多个地址全部保存)</el-checkbox>
         <el-checkbox v-model="insecure" size="small">跳过 HTTPS 证书校验(自签内网服务)</el-checkbox>
         <div class="grow"></div>
-        <el-button v-if="savedSpecUrl" size="small" :loading="probing" @click="syncSaved">
-          一键同步:{{ savedSpecUrl }}
+        <el-button v-if="savedSources.length" size="small" :loading="probing" @click="syncSaved">
+          一键同步({{ savedSources.length }} 个源)
         </el-button>
+        <el-button type="primary" size="small" :loading="probing" @click="probeInput">探测并分析</el-button>
       </div>
       <el-input v-model="headerLines" type="textarea" :rows="2" class="mono" style="margin-top:8px"
         placeholder="拉取规范需认证时填请求头,每行一条,格式 Key: value,如 Authorization: Bearer xxx;保存后一键同步自动携带" />
 
+      <template v-if="results">
+        <el-alert v-if="results.some(r => r.error)" type="warning" :closable="false" style="margin-top:10px"
+          title="部分地址拉取失败(未勾选):修正地址后可重新探测" />
+        <el-table :data="results" size="small" style="margin-top:10px" max-height="420">
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <el-table v-if="row.items?.length" :data="row.items" size="small" style="margin:4px 10px 8px 40px">
+                <el-table-column prop="method" label="方式" width="80">
+                  <template #default="{ row: it }"><span class="method mono" :class="it.method">{{ it.method }}</span></template>
+                </el-table-column>
+                <el-table-column prop="path" label="路径" class-name="mono" min-width="180" />
+                <el-table-column prop="name" label="名称" min-width="140" />
+                <el-table-column label="冲突" width="90">
+                  <template #default="{ row: it }">
+                    <el-tag v-if="it.exists" size="small" type="warning">已存在</el-tag>
+                    <el-tag v-else-if="it.conflictPath" size="small" type="danger">模板歧义</el-tag>
+                    <el-tag v-else size="small" type="success">新建</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="导入动作" width="120">
+                  <template #default="{ row: it }">
+                    <el-select v-model="it.action" size="small" :disabled="!!it.conflictPath">
+                      <el-option label="跳过" value="skip" />
+                      <el-option label="覆盖" value="overwrite" />
+                    </el-select>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </template>
+          </el-table-column>
+          <el-table-column width="44">
+            <template #default="{ row }"><el-checkbox v-model="row.checked" :disabled="!!row.error" /></template>
+          </el-table-column>
+          <el-table-column label="文档" min-width="160" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.title || row.url }}</template>
+          </el-table-column>
+          <el-table-column label="接口数" width="80" align="center">
+            <template #default="{ row }">{{ row.total }}</template>
+          </el-table-column>
+          <el-table-column label="新建/覆盖" width="92" align="center">
+            <template #default="{ row }">{{ row.toCreate }} / {{ row.toOverwrite }}</template>
+          </el-table-column>
+          <el-table-column label="状态" min-width="180" show-overflow-tooltip>
+            <template #default="{ row }">
+              <el-tag v-if="row.error" size="small" type="danger">{{ row.error }}</el-tag>
+              <el-tag v-else size="small" type="success">{{ row.specKind === 'swagger2' ? 'Swagger 2.0(已转换)' : 'OpenAPI 3' }}</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div class="row" style="margin-top:10px">
+          <span class="tip">已勾选 {{ checkedCount }} / {{ results.length }} 个来源,共 {{ checkedTotal }} 个接口(展开行可逐个调整导入动作)</span>
+          <div class="grow"></div>
+          <el-button size="small" :disabled="applying" @click="results.forEach(r => { if (!r.error) markActions(r) })">全部设为覆盖</el-button>
+          <el-button size="small" type="primary" :loading="applying" @click="applyChecked">导入勾选来源</el-button>
+        </div>
+      </template>
+    </div>
+
+    <div class="sec">
+      <h4>导入 OpenAPI 3.0 / Swagger 2.0(yaml / json)</h4>
+      <input type="file" accept=".yaml,.yml,.json" @change="pickFile" />
+      <el-input v-model="content" type="textarea" :rows="6" class="mono" style="margin-top:8px"
+        placeholder="或直接粘贴 OpenAPI / Swagger 内容;$ref 自动内联,Servers 中的 basePath 会自动拼接到接口路径" />
+      <el-button type="primary" size="small" style="margin-top:8px" :loading="analyzing" @click="analyze">
+        解析预检
+      </el-button>
       <template v-if="plan">
         <el-alert v-if="plan.specKind" type="success" :closable="false" style="margin-top:12px"
           :title="`识别为 ${plan.specKind === 'swagger2' ? 'Swagger 2.0(已自动转换)' : 'OpenAPI 3.0'}` +
@@ -76,16 +140,6 @@
         </div>
       </template>
     </div>
-
-    <div class="sec">
-      <h4>导入 OpenAPI 3.0 / Swagger 2.0(yaml / json)</h4>
-      <input type="file" accept=".yaml,.yml,.json" @change="pickFile" />
-      <el-input v-model="content" type="textarea" :rows="6" class="mono" style="margin-top:8px"
-        placeholder="或直接粘贴 OpenAPI / Swagger 内容;$ref 自动内联,Servers 中的 basePath 会自动拼接到接口路径" />
-      <el-button type="primary" size="small" style="margin-top:8px" :loading="analyzing" @click="analyze">
-        解析预检
-      </el-button>
-    </div>
   </div>
 </template>
 
@@ -103,13 +157,21 @@ const props = defineProps({
 const emit = defineEmits(['changed'])
 const auth = useAuth()
 
-const specUrlInput = ref(props.specUrl || '')
+// 展示同步源输入:单地址原样;JSON 数组(多源)拆成每行一个
+function displaySpecUrl(raw) {
+  if (raw && raw.startsWith('[')) {
+    try { return JSON.parse(raw).join('\n') } catch { return raw }
+  }
+  return raw || ''
+}
+const specUrlInput = ref(displaySpecUrl(props.specUrl))
 const saveSource = ref(true)
 const insecure = ref(false)
 const probing = ref(false)
 const analyzing = ref(false)
 const applying = ref(false)
-const plan = ref(null)
+const plan = ref(null)      // 粘贴/文件导入的单源预检结果
+const results = ref(null)   // 服务地址批量探测的多源结果
 const content = ref('')
 
 function storedHeadersToLines(raw) {
@@ -133,8 +195,16 @@ function parseHeaderLines() {
   })
   return out
 }
-// 同步源展示与输入框解耦:保存成功后由父组件刷新 props 生效
-const savedSpecUrl = computed(() => props.specUrl || '')
+// 已保存的同步源列表(兼容单地址字符串与 JSON 数组两种存法)
+const savedSources = computed(() => {
+  const v = props.specUrl || ''
+  if (v.startsWith('[')) {
+    try { return JSON.parse(v).filter(Boolean) } catch { return [] }
+  }
+  return v ? [v] : []
+})
+const checkedCount = computed(() => (results.value || []).filter(r => r.checked && !r.error).length)
+const checkedTotal = computed(() => (results.value || []).filter(r => r.checked && !r.error).reduce((a, r) => a + (r.total || 0), 0))
 
 function pickFile(ev) {
   const f = ev.target.files?.[0]
@@ -148,48 +218,83 @@ function markActions(d) {
   d.items?.forEach(it => { it.action = it.conflictPath ? 'skip' : 'overwrite' })
 }
 
-// 从服务地址探测并分析;返回分析数据(供一键同步直接应用)
-async function probe(url, save) {
-  if (!url?.trim()) { ElMessage.warning('请填写服务地址或规范文档地址'); return null }
+// 批量探测分析:urls 每项独立发现+解析;返回结果行(apply 凭 analysisId 引用内容)
+async function probe(urls, save) {
+  const list = (urls || []).map(u => (u || '').trim()).filter(Boolean)
+  if (!list.length) { ElMessage.warning('请填写服务地址或规范文档地址'); return null }
   probing.value = true
-  plan.value = null
+  results.value = null
   try {
     const headers = parseHeaderLines()
     // 保存同步源时,空请求头 + 已存有请求头 → 显式传 {} 清除;否则空=undefined 沿用后端已存
     const hasStored = !!(props.specHeaders && props.specHeaders !== '{}')
     const payloadHeaders = Object.keys(headers).length ? headers : (save && hasStored ? {} : undefined)
     const d = await api.post(`/projects/${props.projectId}/import/spec-url/analyze`,
-      { url, save: !!save, insecure: insecure.value, headers: payloadHeaders }, { projectId: props.projectId })
-    markActions(d)
-    content.value = d.content || ''
-    plan.value = d
+      { urls: list, save: !!save, insecure: insecure.value, headers: payloadHeaders }, { projectId: props.projectId })
+    const rows = d.results?.length ? d.results : [d] // 兼容旧单地址响应
+    rows.forEach(r => { r.checked = !r.error; markActions(r) })
+    results.value = rows
     if (save) emit('changed')
-    return d
+    return rows
   } catch (e) { ElMessage.error(e.message); return null } finally { probing.value = false }
 }
 
-function probeInput() { probe(specUrlInput.value, saveSource.value) }
+function probeInput() { probe(specUrlInput.value.split('\n'), saveSource.value) }
 
-// 一键同步:拉取已保存的同步源 → 确认 → 全部覆盖导入
+// 按分析ID批量导入勾选来源;汇总各源结果
+async function applyChecked() {
+  const rows = (results.value || []).filter(r => r.checked && !r.error && r.analysisId)
+  if (!rows.length) { ElMessage.warning('请先勾选要导入的来源'); return }
+  applying.value = true
+  try {
+    let created = 0, updated = 0, skipped = 0
+    const allConflicts = []
+    for (const r of rows) {
+      const decisions = r.items.map(it => ({ method: it.method, path: it.path, action: it.action || 'overwrite' }))
+      const d = await api.post(`/projects/${props.projectId}/import/openapi/apply`,
+        { analysisId: r.analysisId, decisions }, { projectId: props.projectId })
+      created += d.created; updated += d.updated; skipped += d.skipped
+      if (d.conflicts?.length) allConflicts.push(...d.conflicts)
+    }
+    let msg = `${rows.length} 个来源:新建 ${created},更新 ${updated},跳过 ${skipped}`
+    if (allConflicts.length) msg += `,模板冲突 ${allConflicts.length}:${allConflicts.slice(0, 5).join('、')}${allConflicts.length > 5 ? '…' : ''}`
+    ElMessage.success('导入完成:' + msg)
+    results.value = null
+    emit('changed')
+  } catch (e) { ElMessage.error(e.message) } finally { applying.value = false }
+}
+
+// 一键同步:遍历已保存的全部同步源 → 拉取确认 → 全部覆盖导入
 async function syncSaved() {
-  if (!savedSpecUrl.value) return
-  const d = await probe(savedSpecUrl.value, true)
-  if (!d || !d.total) return
+  const urls = savedSources.value
+  if (!urls.length) return
+  const rows = await probe(urls, true)
+  if (!rows) return
+  const okRows = rows.filter(r => !r.error && r.total)
+  const total = okRows.reduce((a, r) => a + r.total, 0)
+  const fails = rows.filter(r => r.error).length
+  if (!total) { ElMessage.warning('同步源均未返回接口' + (fails ? `(${fails} 个拉取失败)` : '')); return }
   try {
     await ElMessageBox.confirm(
-      `同步源返回 ${d.total} 个接口:新建 ${d.toCreate} 个,覆盖 ${d.toOverwrite} 个。` +
+      `${okRows.length} 个同步源共 ${total} 个接口${fails ? `,另有 ${fails} 个来源拉取失败` : ''}。` +
       '同步将覆盖项目中同 method+path 的接口(含文档与 Mock 配置),确认执行?',
       '一键同步', { type: 'warning', confirmButtonText: '全部覆盖导入' })
   } catch { return }
   applying.value = true
   try {
-    const decisions = d.items.map(it => ({ method: it.method, path: it.path, action: 'overwrite' }))
-    const r = await api.post(`/projects/${props.projectId}/import/openapi/apply`,
-      { content: d.content, decisions }, { projectId: props.projectId })
-    let msg = `新建 ${r.created},更新 ${r.updated},跳过 ${r.skipped}`
-    if (r.conflicts?.length) msg += `,模板冲突 ${r.conflicts.length}:${r.conflicts.join('、')}`
+    let created = 0, updated = 0, skipped = 0
+    const allConflicts = []
+    for (const r of okRows) {
+      const decisions = r.items.map(it => ({ method: it.method, path: it.path, action: 'overwrite' }))
+      const d = await api.post(`/projects/${props.projectId}/import/openapi/apply`,
+        { analysisId: r.analysisId, decisions }, { projectId: props.projectId })
+      created += d.created; updated += d.updated; skipped += d.skipped
+      if (d.conflicts?.length) allConflicts.push(...d.conflicts)
+    }
+    let msg = `新建 ${created},更新 ${updated},跳过 ${skipped}`
+    if (allConflicts.length) msg += `,模板冲突 ${allConflicts.length}`
     ElMessage.success('同步完成:' + msg)
-    plan.value = null
+    results.value = null
     emit('changed')
   } catch (e) { ElMessage.error(e.message) } finally { applying.value = false }
 }
